@@ -22,19 +22,21 @@
 
 using namespace lbcrypto;
 
-KeyPair<DCRTPoly> key_gen(const InstanceParams& prms);
+KeyPair<DCRTPoly> key_gen(const InstanceParams& prms, bool count_only);
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::cout << "Usage: " << argv[0] << " instance-size\n";
+  if (argc < 2 || !std::isdigit(argv[1][0])) {
+    std::cout << "Usage: " << argv[0] << " instance-size [--count_only]\n";
     std::cout << "  Instance-size: 0-TOY, 1-SMALL, 2-MEDIUM, 3-LARGE\n";
     return 0;
   }
   auto size = static_cast<InstanceSize>(std::stoi(argv[1]));
   InstanceParams prms(size);
 
+  bool count_only = (argc > 2 && std::string(argv[2])=="--count_only");
+
   // Generate fresh keys
-  auto keys = key_gen(prms);
+  auto keys = key_gen(prms, count_only);
   auto cc = keys.publicKey->GetCryptoContext();
 
   // Store context and keys to disk
@@ -61,7 +63,7 @@ int main(int argc, char* argv[]) {
 
 // Generate keys that include all the rotations needed for replication,
 // running sums, and total sums
-KeyPair<DCRTPoly> key_gen(const InstanceParams& prms)
+KeyPair<DCRTPoly> key_gen(const InstanceParams& prms, bool count_only)
 {
   CCParams<CryptoContextCKKSRNS> cParams;
   cParams.SetSecretKeyDist(UNIFORM_TERNARY);
@@ -88,17 +90,22 @@ KeyPair<DCRTPoly> key_gen(const InstanceParams& prms)
   auto keyPair = cc->KeyGen();            // secret/public keys
   cc->EvalMultKeyGen(keyPair.secretKey);  // re-linearization key
 
-  // calculate the rotation amounts needed
+  // Calculate the rotation amounts needed
   auto rots4reps = DFSSlotReplicator::get_rotation_amounts(prms.getDegrees());
-  std::vector<int> shifts(PAYLOAD_DIM - 1); // Generate summation keys
-  for (int i = 1; i < PAYLOAD_DIM; i++) {
-    shifts[i - 1] = -i * prms.getNCols();
+  if (count_only) {
+    cc->EvalAtIndexKeyGen(keyPair.secretKey, rots4reps);
+    cc->EvalSumKeyGen(keyPair.secretKey);
+  } else {
+    std::vector<int> shifts(PAYLOAD_DIM - 1); // Generate summation keys
+    for (int i = 1; i < PAYLOAD_DIM; i++) {
+      shifts[i - 1] = -i * prms.getNCols();
+    }
+    auto shifts2 = RunningSums::get_shift_amounts(
+      prms.getNSlots(), prms.getNCols(), RUNNING_SUM_LEVELS);
+    std::vector<std::vector<int>> all_shifts = {rots4reps, shifts, shifts2};
+    cc->EvalAtIndexKeyGen(keyPair.secretKey, vector_union(all_shifts));
+    cc->EvalSumRowsKeyGen(keyPair.secretKey, keyPair.publicKey,
+                          prms.getNCols() * PAYLOAD_DIM);
   }
-  auto shifts2 = RunningSums::get_shift_amounts(
-    prms.getNSlots(), prms.getNCols(), RUNNING_SUM_LEVELS);
-  std::vector<std::vector<int>> all_shifts = {rots4reps, shifts, shifts2};
-  cc->EvalAtIndexKeyGen(keyPair.secretKey, vector_union(all_shifts));
-  cc->EvalSumRowsKeyGen(keyPair.secretKey, keyPair.publicKey,
-                        prms.getNCols() * PAYLOAD_DIM);
   return keyPair;
 }

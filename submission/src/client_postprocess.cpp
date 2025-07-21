@@ -16,23 +16,28 @@ std::vector<std::vector<int16_t>>
 decode_results(const std::vector<double>& slots, int n_cols);
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::cout << "Usage: " << argv[0] << " instance-size\n";
+  if (argc < 2 || !std::isdigit(argv[1][0])) {
+    std::cout << "Usage: " << argv[0] << " instance-size [--count_only]\n";
     std::cout << "  Instance-size: 0-TOY, 1-SMALL, 2-MEDIUM, 3-LARGE\n";
     return 0;
   }
   auto size = static_cast<InstanceSize>(std::stoi(argv[1]));
   InstanceParams prms(size);
 
+  bool count_only = (argc > 2 && std::string(argv[2])=="--count_only");
+
   // Read the raw result slots from disk
   auto vs = read2vecs<double>(prms.iodir()/"raw-result.bin",prms.getNSlots());
   assert(vs.size()==1);
   auto slots = vs[0];
 
-  // Decode the raw results and write back to disk
-  auto res = decode_results(slots, prms.getNCols());
-  write2disk<int16_t>(prms.iodir()/"results.bin",res);  // write to disk
-
+  if (count_only) {  // Write a single integer containing the sum
+    long count = std::round(slots[0]);
+    write2disk<long>(prms.iodir()/"results.bin", {{count}});
+  } else {  // Decode the raw results to a list of playloads
+    auto res = decode_results(slots, prms.getNCols());
+    write2disk<int16_t>(prms.iodir()/"results.bin", res);
+  }
   return 0;
 }
 

@@ -7,8 +7,8 @@ verify_result.py - correctness oracle for cosine similarity
 #
 # This software is licensed under the terms of the Apache v2 License.
 # See the LICENSE.md file for details.
+import argparse
 import sys
-from pathlib import Path
 import numpy as np
 
 # The payloads are vectors of 7 int16 numbers
@@ -16,20 +16,37 @@ PAYLOAD_DIM = 7
 
 def main():
     """
-    Usage:  python3 verify_result.py  <expected_file>  <result_file>
+    Usage:  python3 verify_result.py  <expected_file>  <result_file> [--count_only]
     Returns exit-code 0 if equal or if there are more than 32 expected results, 1 otherwise.
     Prints a message so the caller can log it.
     """
-    if len(sys.argv) != 3:
-        print("Usage: verify_result.py <expected> <result>")
-        sys.exit(0)
+    # Parse arguments using argparse
+    parser = argparse.ArgumentParser(description='Copmare expeocted vs obtained results.')
+    parser.add_argument('expected_file', type=str,
+                        help='File containing the expected results')
+    parser.add_argument('result_file', type=str,
+                        help='File containing the obtained results')
+    parser.add_argument('--count_only', action='store_true',
+                        help='Only # of matches, not payloads')
 
-    expected_file = Path(sys.argv[1])
-    result_file = Path(sys.argv[2])
+    args = parser.parse_args()
+
+    if args.count_only: # not payloads
+        # Read the expected and result binary files, containing just a counter
+        expected_data = np.fromfile(args.expected_file, dtype=np.int_)
+        result_data = np.fromfile(args.result_file, dtype=np.int_)
+
+        if np.array_equal(expected_data, result_data):
+            print(f"         [harness] PASS (result={expected_data})")
+            sys.exit(0)
+        else:
+            print(f"         [harness] FAIL (expected {expected_data}",
+                  f"but found {result_data})")
+            sys.exit(1)
 
     # Read the expected and result binary files containing payload vectors
-    expected_data = np.fromfile(expected_file, dtype=np.int16)
-    result_data = np.fromfile(result_file, dtype=np.int16)
+    expected_data = np.fromfile(args.expected_file, dtype=np.int16)
+    result_data = np.fromfile(args.result_file, dtype=np.int16)
 
     # Reshape into payload vectors
     expected_payloads = expected_data.reshape(-1, PAYLOAD_DIM)

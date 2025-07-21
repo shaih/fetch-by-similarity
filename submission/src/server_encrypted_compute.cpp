@@ -21,6 +21,11 @@
 
 using namespace lbcrypto;
 
+#undef DEBUG
+#ifdef DEBUG
+PrivateKey<DCRTPoly> sk;
+#endif
+
 // A utility function to get one encrypted ciphertext from the dataset. This
 // implementation assumes that ciphertexts are just separate files on disk,
 // it should be re-written if they are streamed from a remote location.
@@ -53,7 +58,7 @@ std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
 // will sum up upto eight matches, then multiply by the original thing,
 // and need to fit the result to the interval [-1,1].
 void compare_to_threshold(std::vector<Ciphertext<DCRTPoly>>& ctxts,
-                          double threshold);
+                          double threshold, bool count_only);
 
 // Compare each point in the vectors to the number, using a Chebyshev
 // approximation of the function chi(x) = (x == number).
@@ -72,16 +77,35 @@ Ciphertext<DCRTPoly> get_encrypted_payload(fs::path datadir, size_t batch,
 Ciphertext<DCRTPoly> total_sums(
   const Ciphertext<DCRTPoly>& ct, const InstanceParams& prms);
 
+#ifdef DEBUG
+static void printCts(
+  const std::vector<Ciphertext<DCRTPoly>>& cts, std::string label)
+{
+  std::cout << label << "[";
+  for (auto& ct: cts) {
+    Plaintext pt;
+    sk->GetCryptoContext()->Decrypt(sk, ct, &pt);
+    std::vector<double> slots = pt->GetRealPackedValue();
+    std::cout << label << " [";
+    for (auto x: slots) {
+      if (std::abs(x) < 0.1) { std::cout << "0 "; }
+      else { printf("%.1f ", x); }
+    }
+    std::cout << ']' << std::endl;
+  }
+}
+#endif
 /*******************************************************************/
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::cout << "Usage: " << argv[0] << " instance-size\n";
+  if (argc < 2 || !std::isdigit(argv[1][0])) {
+    std::cout << "Usage: " << argv[0] << " instance-size [--count_only]\n";
     std::cout << "  Instance-size: 0-TOY, 1-SMALL, 2-MEDIUM, 3-LARGE\n";
     return 0;
   }
   auto size = static_cast<InstanceSize>(std::stoi(argv[1]));
-  InstanceParams prms(size);
+  bool count_only = (argc > 2 && std::string(argv[2])=="--count_only");
 
+  InstanceParams prms(size);
   constexpr double threshold = 0.8;
 
   // Read the crypto context and the public key from disk
@@ -93,6 +117,11 @@ int main(int argc, char* argv[]) {
   if (!Serial::DeserializeFromFile(prms.keydir()/"pk.bin", pk, SerType::BINARY)) {
     throw std::runtime_error("Failed to get public key from "+prms.keydir().string());
   }
+#ifdef DEBUG
+  if (!Serial::DeserializeFromFile(prms.keydir()/"sk.bin", sk, SerType::BINARY)) {
+    throw std::runtime_error("Failed to get secret key from "+prms.keydir().string());
+  }
+#endif
 
   std::ifstream emult_file(prms.keydir()/"mk.bin", std::ios::in | std::ios::binary);
   if (!emult_file.is_open() ||
@@ -123,11 +152,38 @@ int main(int argc, char* argv[]) {
 
   // Compare each slot in the results ctxts to the threshold, using a
   // Chebyshev approximation of the indicator function chi(x)=(x>=threshold).
-  // Rather than approximating 0/1 outcome, we scale it to 0/sqrt(0.25),
+  // If we only want to count the matches, then we use use a higher-degree
+  // approximation since we care about good approximation for both matches
+  // and non-matches (and becuase we can afford it level-wise).
+  // Otherwise we use lower-degree approximation since we mostly care about
+  // accuracy of the non-matches. Also, we scale it to 0/0.5 rather than 0/1,
   // since we sum up upto eight matches, then multiply by the original thing,
   // and need to fit the result to the interval [-1,1].
-  compare_to_threshold(result, threshold);
+  compare_to_threshold(result, threshold, count_only);
   log_step(2, "Compare to threshold");
+
+  // If we only want to count matches, return the total sum
+  // of all the slots in all the ciphertexts.
+  if (count_only) {
+#ifdef DEBUG
+    printCts(result, " match vector:");
+#endif
+    for (size_t i=1; i<result.size(); i++) {
+      cc->EvalAddInPlace(result[0], result[i]);
+    }
+    result[0] = cc->EvalSum(result[0], prms.getNSlots());
+#ifdef DEBUG
+    printCts({result[0]}, " summed match vector:");
+#endif
+    log_step(3, "Summation");
+
+    std::string out_fname = prms.encdir()/"results.bin";
+    if (!Serial::SerializeToFile(out_fname, result[0], SerType::BINARY)) {
+      throw std::runtime_error("Failed to write ciphertext to " + out_fname);
+    }
+    return 0;
+  }
+
   // Make a deep copy of the matches, it will be multiplied back into the
   // result after the running-sum procedure
   std::vector<Ciphertext<DCRTPoly>> matches;
@@ -318,10 +374,14 @@ std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
 
 /*******************************************************************/
 // Compare each slot in the ctxts to the threshold, using a Chebyshev
-// approximation of the indicator function chi(x) = (x >= threshold). Rather
-// than approximating 0/1 outcome, we scale it to 0/sqrt(0.25), since we
-// sum up upto eight matches, then multiply by the original thing, and need
-// to fit the result to the interval [-1,1].
+// approximation of the indicator function chi(x) = (x >= threshold).
+// If we only want to count the matches, then we use use a higher-degree
+// approximation since we care about good approximation for both matches
+// and non-matches (and becuase we can afford it level-wise).
+// Otherwise we use lower-degree approximation since we mostly care about
+// accuracy of the non-matches. Also, we scale it to 0/0.5 rather than 0/1,
+// since we sum up upto eight matches, then multiply by the original thing,
+// and need to fit the result to the interval [-1,1].
 
 // A sigmoid-like function. The constant 69 was determined by experiments
 constexpr double sigmoid_inscale = 69.0;
@@ -331,11 +391,12 @@ double sigmoid(double x, double outscale = 1.0,
 }
 
 void compare_to_threshold(std::vector<Ciphertext<DCRTPoly>>& ctxts,
-                          double threshold) {
-  auto func = [threshold](double x) {
-    return sigmoid(x - threshold, /*outscale=*/0.504);
+                          double threshold, bool count_only) {
+  double outscale = count_only? 1.0 : 0.504;
+  auto func = [threshold, outscale](double x) {
+    return sigmoid(x - threshold, outscale);
   };
-  constexpr size_t degree = 59;  // options are 59, 119, 247
+  size_t degree = (count_only? 247 : 59);  // options are 59, 119, 247
   auto cc = ctxts.front()->GetCryptoContext();
   for (auto& ct : ctxts) {
     ct = cc->EvalChebyshevFunction(func, ct, -1.0, 1.0, degree);

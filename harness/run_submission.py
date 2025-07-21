@@ -10,7 +10,6 @@ run_submission.py - run the entire submission process, from build to verify
 import sys
 import argparse
 import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -58,6 +57,8 @@ def main():
                         help='Number of times to run steps 4-9 (default: 1)')
     parser.add_argument('--seed', type=int,
                         help='Random seed for dataset and query generation')
+    parser.add_argument('--count_only', action='store_true',
+                        help='Only count # of matches, do not return payloads')
 
     args = parser.parse_args()
     size = args.size
@@ -83,6 +84,10 @@ def main():
     exec_dir = params.rootdir/"submission"/"build"
 
     print(f"\n[harness] Running submission for {instance_name(size)} dataset")
+    if args.count_only:
+        print("          only counting matches")
+    else:
+        print("          returning matching payloads")
 
     # 0. Generate the dataset (and centers) using harness/generate_dataset.py
 
@@ -112,7 +117,10 @@ def main():
     # Note: this does not use the rng seed above, it lets the implementation
     #   handle its own prg needs. It means that even if called with the same
     #   seed multiple times, the keys and ciphertexts will still be different.
-    subprocess.run([exec_dir/"client_key_generation", str(size)], check=True)
+    cmd = [exec_dir/"client_key_generation", str(size)]
+    if args.count_only:
+        cmd.extend(["--count_only"])
+    subprocess.run(cmd, check=True)
     subprocess.run([exec_dir/"client_encode_encrypt_db", str(size)], check=True)
 
     # Report size of keys and encrypted data
@@ -148,16 +156,25 @@ def main():
         log_step(5, "Query encryption")
 
         # 6. Server side, run exec_dir/server_encrypted_compute
-        subprocess.run([exec_dir/"server_encrypted_compute", str(size)], check=True)
+        cmd = [exec_dir/"server_encrypted_compute", str(size)]
+        if args.count_only:
+            cmd.extend(["--count_only"])
+        subprocess.run(cmd, check=True)
         log_step(6, "Encrypted computation")
-        
+
         # 7. Client side, decrypt and postprocess
         subprocess.run([exec_dir/"client_decrypt_decode", str(size)], check=True)
-        subprocess.run([exec_dir/"client_postprocess", str(size)], check=True)
+        cmd = [exec_dir/"client_postprocess", str(size)]
+        if args.count_only:
+            cmd.extend(["--count_only"])
+        subprocess.run(cmd, check=True)
         log_step(7, "Result decryption and postprocessing")
 
         # 8. Run the plaintext processing in cleartext_impl.py and verify_results
-        subprocess.run(["python3", harness_dir/"cleartext_impl.py", str(size)], check=True)
+        cmd = ["python3", harness_dir/"cleartext_impl.py", str(size)]
+        if args.count_only:
+            cmd.extend(["--count_only"])
+        subprocess.run(cmd, check=True)
 
         # 9. Verify results
         expected_file = params.datadir() / "expected.bin"
@@ -167,8 +184,11 @@ def main():
             print(f"Error: Result file {result_file} not found")
             sys.exit(1)
 
-        subprocess.run(["python3", harness_dir/"verify_result.py",
-                        str(expected_file), str(result_file)], check=False)
+        cmd = ["python3", harness_dir/"verify_result.py",
+               str(expected_file), str(result_file)]
+        if args.count_only:
+            cmd.extend(["--count_only"])
+        subprocess.run(cmd, check=False)
 
     print(f"\nAll steps completed for {instance_name(size)} dataset!")
 

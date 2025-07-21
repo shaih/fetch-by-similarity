@@ -10,8 +10,7 @@ benchmark that operates on cleartext data.
 #
 # This software is licensed under the terms of the Apache v2 License.
 # See the LICENSE.md file for details.
-import sys
-from pathlib import Path
+import argparse
 import numpy as np
 from params import InstanceParams, TOY, LARGE
 
@@ -26,14 +25,15 @@ def main():
     * Extract that payload vectors for rows i for which sim[i]>0.8
     * Sort the extracted vectors and write to disk
     """
-    # Parse size argument
-    if len(sys.argv) != 2:
-        print("Usage: python3 cleartext_impl.py <size> (0-toy/1-small/2-medium/3-large)")
-        sys.exit(1)
+    # Parse arguments using argparse
+    parser = argparse.ArgumentParser(description='Cleartext implementation of fetch-by-similarity workload.')
+    parser.add_argument('size', type=int, choices=range(TOY, LARGE+1),
+                        help='Instance size (0-toy/1-small/2-medium/3-large)')
+    parser.add_argument('--count_only', action='store_true',
+                        help='Only count # of matches, do not return payloads')
 
-    size = int(sys.argv[1])
-    if size < TOY or size > LARGE:
-        raise ValueError(f"Size must be between {TOY} and {LARGE}")
+    args = parser.parse_args()
+    size = args.size
 
     # Use params.py to get instance parameters
     params = InstanceParams(size)
@@ -48,17 +48,24 @@ def main():
 
     # Compute the similarities between the query and all the vectors in db
     sim = db @ v # matrix multiplication
+    matches = sim > 0.8
 
-    # read the payloads, n_records vectors of dimension PAYLOAD_DIM=7
-    payload_file = dataset_dir / "payloads.bin"
-    payloads = np.fromfile(payload_file, dtype=np.int16).reshape(-1, PAYLOAD_DIM)
+    if args.count_only:
+        # Write to file the number of matches, as an int16
+        n_matches: np.int_ = matches.sum()
+        n_matches.tofile(dataset_dir/"expected.bin")
+        # NOTE: to_file write complete machine words, even if the value is short
 
-    # Extract the payload vectors for rows i for which sim[i]>0.8
-    extracted_payloads = payloads[sim > 0.8]
+    else:
+        # Read the payloads, vectors of dimension PAYLOAD_DIM=7
+        payload_file = dataset_dir / "payloads.bin"
+        payloads = np.fromfile(payload_file, dtype=np.int16).reshape(-1, PAYLOAD_DIM)
+        # Extract the payload vectors for the matches
+        extracted_payloads = payloads[matches]
 
-    # Sort the extracted payload vectors lexicographically and write to disk
-    sorted_ps = extracted_payloads[np.lexsort(extracted_payloads.T[::-1])]
-    sorted_ps.tofile(dataset_dir/"expected.bin")
+        # Sort the payload vectors lexicographically and write to disk
+        sorted_ps = extracted_payloads[np.lexsort(extracted_payloads.T[::-1])]
+        sorted_ps.tofile(dataset_dir/"expected.bin")
 
 
 if __name__ == "__main__":
