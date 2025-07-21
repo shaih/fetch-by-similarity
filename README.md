@@ -1,4 +1,4 @@
-## Running the "add two numbers" workload
+## Running the fetch-by-similarity workload
 
 ```console
 git clone <<reposiroty-URL>> <<path>>
