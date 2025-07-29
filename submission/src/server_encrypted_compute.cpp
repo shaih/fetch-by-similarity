@@ -37,6 +37,7 @@ inline Ciphertext<DCRTPoly> get_ctxt(fs::path ct_name) {
   return ct;
 }
 
+// Print logging information to stdout
 void log_step(int num, std::string name) {
   auto [timestamp, duration] = getCurrentTimeFormatted();
   std::cout << timestamp << " [server] " << num <<": "<< name << " completed";
@@ -47,8 +48,8 @@ void log_step(int num, std::string name) {
 }
 
 // Matrix-vector product: The matrix rows are stored on disk in batches
-// under iodir/batchNNNN/. The equery ciphertext contains the query vector,
-// repeatd to fill in all the slots.
+// under iodir/<size>/encrypted/batchNNNN/. The query ciphertext contains
+// the query vector, repeatd to fill in all the slots.
 std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
                 Ciphertext<DCRTPoly> qry, const InstanceParams& prms);
 
@@ -56,24 +57,25 @@ std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
 // approximation of the indicator function chi(x) = (x >= threshold).
 // Rather than approximating 0/1 outcome, we scale it to 0/0.5, since we
 // will sum up upto eight matches, then multiply by the original thing,
-// and need to fit the result to the interval [-1,1].
+// and need to fit the result to a size-2 interval that can be shifted
+// to [+-1].
 void compare_to_threshold(std::vector<Ciphertext<DCRTPoly>>& ctxts,
                           double threshold, bool count_only);
 
-// Compare each point in the vectors to the number, using a Chebyshev
+// Compare each slot in the ciphertexts to the number, using a Chebyshev
 // approximation of the function chi(x) = (x == number).
 std::vector<Ciphertext<DCRTPoly>> compare_to_number(
     const std::vector<Ciphertext<DCRTPoly>>& ctxts, double number);
 
-// Read the ith payload value of all the records from disk
+// Read from disk the ith payload value of all the records, namely the
+// i'th row of the payload matrix.
 Ciphertext<DCRTPoly> get_encrypted_payload(fs::path datadir, size_t batch,
                                             size_t idx);
 
-// A SIMD-optimized procedure for computing total sums. The slots in all the
-// ciphertexts are viewed as a matrix, and total sums are computed per column.
-// The results are returned in a single ciphertext, which is also viewed as
-// a matrix with the same number of columns. All the entries of an output
-// column contain the total sum of entries from that column in the input.
+// A SIMD-optimized procedure for computing total sums. The slots are viewed
+// as a matrix, and total sums are computed in each column separately.
+// All the entries of an output column contain the total sum of entries from
+// that column in the input.
 Ciphertext<DCRTPoly> total_sums(
   const Ciphertext<DCRTPoly>& ct, const InstanceParams& prms);
 
@@ -117,7 +119,7 @@ int main(int argc, char* argv[]) {
   if (!Serial::DeserializeFromFile(prms.keydir()/"pk.bin", pk, SerType::BINARY)) {
     throw std::runtime_error("Failed to get public key from "+prms.keydir().string());
   }
-#ifdef DEBUG
+#ifdef DEBUG // Read also the secret key for debugging
   if (!Serial::DeserializeFromFile(prms.keydir()/"sk.bin", sk, SerType::BINARY)) {
     throw std::runtime_error("Failed to get secret key from "+prms.keydir().string());
   }
@@ -146,36 +148,38 @@ int main(int argc, char* argv[]) {
   }
   log_step(0, "Loading keys");
 
-  // Matrix-vector multiplication, reading the encrypted matrix from encdir
+  // Matrix-vector multiplication, reading the encrypted matrix one
+  // ciphertexe at a time from encdir
   auto result = mat_vec_mult(prms.encdir(), eqry, prms);
   log_step(1, "Matrix-vector product");
 
   // Compare each slot in the results ctxts to the threshold, using a
   // Chebyshev approximation of the indicator function chi(x)=(x>=threshold).
   // If we only want to count the matches, then we use use a higher-degree
-  // approximation since we care about good approximation for both matches
-  // and non-matches (and becuase we can afford it level-wise).
-  // Otherwise we use lower-degree approximation since we mostly care about
-  // accuracy of the non-matches. Also, we scale it to 0/0.5 rather than 0/1,
-  // since we sum up upto eight matches, then multiply by the original thing,
-  // and need to fit the result to the interval [-1,1].
+  // approximation since (a) we care about good approximation for both matches
+  // and non-matches and (b) we can afford it level-wise.
+  // Otherwise we use lower-degree approximation since we care a little less
+  // about the accuracy of matches, more about non-matches (as we have more of
+  // them). Also, we scale it to 0/0.5 rather than 0/1, since we sum up upto
+  // eight matches, then multiply by the original thing, and need to fit the
+  // result to a size-2 interval that can be shifted to the interval [-1,1].
   compare_to_threshold(result, threshold, count_only);
   log_step(2, "Compare to threshold");
+#ifdef DEBUG
+    printCts(result, " match vector:");
+#endif
 
   // If we only want to count matches, return the total sum
   // of all the slots in all the ciphertexts.
   if (count_only) {
-#ifdef DEBUG
-    printCts(result, " match vector:");
-#endif
     for (size_t i=1; i<result.size(); i++) {
       cc->EvalAddInPlace(result[0], result[i]);
     }
     result[0] = cc->EvalSum(result[0], prms.getNSlots());
+    log_step(3, "Summation");
 #ifdef DEBUG
     printCts({result[0]}, " summed match vector:");
 #endif
-    log_step(3, "Summation");
 
     std::string out_fname = prms.encdir()/"results.bin";
     if (!Serial::SerializeToFile(out_fname, result[0], SerType::BINARY)) {
@@ -192,37 +196,37 @@ int main(int argc, char* argv[]) {
     matches.push_back(ct->Clone());
   }
 
-  // The "compaction" procedure views the matches vector (which is actually
-  // stored in multiple ciphertexts of dimension N_SLOTS) as a matrix with
-  // N_COLS columns, and expect no more than eight matches per column. The
-  // columns are packed equally-spaced in the ciphertexts, so each ciphertext
-  // contains N_SLOTS/N_COLS entries from each column.
+  // The "compaction" procedure views the matches vector (made of multiple
+  // ciphertexts of dimension N_SLOTS) as a matrix with N_COLS=prms.getNCols()
+  // columns, and expect no more than eight matches per column. The columns
+  // are packed equally-spaced in the ciphertexts, so each ciphertext contains
+  // N_SLOTS/N_COLS entries from each column.
   // For example, if we had three ciphertexts with N_SLOTS=8 and N_COLS=4,
-  // we would have two entries from each column in each ciphertexts, and the
+  // we would have two entries from each column per ciphertexts, and the
   // arrnagement is as follows:    [ a1 a2 a3 a4 d1 d2 d3 d4 ]
   //                               [ b1 b2 b3 b4 e1 e2 e3 e4 ]
   //                               [ c1 c2 c3 c4 f1 f2 f3 f4 ]
-  // This can be thought of a matrix with i'th column being
-  // [ai bi ci di ei fi]^t, we expect no more than 8 ones in each column.
+  // This represents a matrix with i'th column being [ai bi ci di ei fi]^t,
+  // we expect no more than 8 ones in each column.
 
   // Running sums in each column, so the first match will have value 1,
   // the second match will have 2, etc.
   RunningSums rs(cc,prms.getNCols(),RUNNING_SUM_LEVELS,result[0]->GetLevel());
   rs.eval_in_place(result);  // The actual running-sums procedure
 
-  // Multiply by the matches so only the matches (non-zero entries) remain
+  // Multiply by the matches vector, to zero out all the non-matches
   for (size_t i = 0; i < result.size(); i++) {
     result[i] = cc->EvalMult(result[i], matches[i]);
   }
   matches.clear();          // not needed anymore
   matches.shrink_to_fit();  // release the memory
 
-  // Contents of slots are now in the range [0,2],
-  // subtract one to map them to [-1,1]
+  // Contents of slots are now in the range [0,2], shift them to [-1,1]
   for (auto& ct : result) {
     cc->EvalSubInPlace(ct, 1.0);
   }
   log_step(3, "Running sums");
+
   // We now get the actual payload data corresponding to the matches. Recall
   // that we expect at most MAX_N_MATCH(=8) matches per column: the 1st is
   // marked by a 1 slot in the result ciphertext, the 2nd by a 2 slot, etc.
@@ -230,9 +234,9 @@ int main(int argc, char* argv[]) {
 
   // To get the actual data, we run MAX_N_MATCH(=8) iterations, in the i'th
   // iteration we isolate the PAYLOAD_DIM payload slots of the ith match
-  // (i.e., the slot that contains i). We first compute an indicator ctxt
-  // with 1 in the slots where result has i, and zero elsewhere (so we have
-  // a single 1 per column).
+  // (i.e., the slot that contains i). We first compute an "one hot" indicator
+  // ctxt with 1 in the slots where result has i, and zero elsewhere (so we
+  // have a single 1 per column).
 
   // Once we compute the i'th indicator, we need to extract the PAYLOAD_DIM
   // payload entries in the columns corresponding to the 1s in this indicator,
@@ -242,7 +246,7 @@ int main(int argc, char* argv[]) {
   //   indicator vector. This yeilds PAYLOAD_DIM vectors with the jth one
   //   containing the jth payload value of the records corresponding to the
   //   1s in the indicator. Each column has at most one non-zero payload
-  //   values, all in the same slot.
+  //   values, all in the same slot index.
   // 2. We tile these PAYLOAD_DIM vectors so that the non-zero values appear
   //   in consecutive positions in the column. Since columns in spread
   //   acorss the slots then it means that the PAYLOAD_DIM payload slots
@@ -259,38 +263,46 @@ int main(int argc, char* argv[]) {
     double x_i = i / 4.0 - 1.0;  // map from {0,8} to the interval [-1,1]
     auto indicator = compare_to_number(result, x_i);
 
-    // Indicator has 1 in the slots where partial_sums contained i
+    // Indicator has as many ciphertexe as it takes to store a row of the keys
+    // matrix (i.e., one slot for each dataset recrod). It's a "one hot" vector
+    // vector per column, containing 1 in slots where partial_sums contained i
 
     // A place holder for the extracted payload, before moving them to
     // their place in the output columns.
     Ciphertext<DCRTPoly> to_replicate;
     for (size_t j = 0; j < PAYLOAD_DIM; j++) {
       // Steps 1 & 2: Multiply by the indicator to get a single payload value
-      // per column, then rotate by i*N_COLS to put that value in the next
+      // per column, then rotate by j*N_COLS to put that value in the next
       // available slot in its column.
       for (size_t k = 0; k < indicator.size(); k++) {
         auto payload_part = get_encrypted_payload(prms.encdir(), k, j);
         // jth row in the k'th matrix
 
         payload_part = cc->EvalMult(payload_part, indicator[k]);
-        if (j == 0 && k == 0) {
+
+        // Shift the j'th payload value by j positions in its column, so we
+        // pack all PAYLOAD_DIM=8 values consecutively in their column.
+        if (j == 0 && k == 0) {   // initialize the inner-loop accumulator
           to_replicate = payload_part->Clone();
         } else {
-          if (j != 0) {
+          if (j != 0) {  // shift by j in its column
             payload_part = cc->EvalRotate(payload_part, -j * prms.getNCols());
           }
-          to_replicate = cc->EvalAdd(to_replicate, payload_part);
+          to_replicate = cc->EvalAdd(to_replicate,payload_part);  // accumulate
         }
-        // We assume that indicator has a single 1 in each output column
-        // and all else are zero, so for each index s>N_SLOTS at most
-        // one of the values added to to_replicate[s] will be non-zero.
+        // We assume that indicator has a single 1 in each output column and
+        // all else are zero. So for each slot index s<N_SLOTS, at most one
+        // of the values added to to_replicate[s] will be non-zero. This let us
+        // use a single cipehrtext for to_replicate, even though the indicator
+        // is a vector of ciphertexts, we just add everything and are assured
+        // that at most one of the terms is non-zero.
       }
     }
 
     // Step 3: replicate the values across the column
-    // We need to move the (up to) PAYLOAD_DIM non-zero slots in each
+    // We need to move the (potential) PAYLOAD_DIM non-zero slots in each
     // output column to positions {i*PAYLOAD_DIM,...,(i+1)*PAYLOAD_DIM-1}
-    // in that column. This is done by first replicating them so that theu
+    // in that column. This is done by first replicating them so that they
     // fill the entire column, then multiplying by a mask that zero out
     // everything else, leaving only those positions.
     auto replicated = total_sums(to_replicate, prms);
@@ -307,7 +319,7 @@ int main(int argc, char* argv[]) {
     auto masked = cc->EvalMult(replicated, mask);
 
     // Finally, add the payload values to all the other matches in that column
-    if (i == 1) {
+    if (i == 1) {  // initialize the outter accumulator
       accumulator = masked;
     } else {
       accumulator = cc->EvalAdd(accumulator, masked);
@@ -328,8 +340,8 @@ int main(int argc, char* argv[]) {
 
 /*******************************************************************/
 // Matrix-vector product: The matrix rows are stored on disk in batches
-// under encdir/batchNNNN/. The equery ciphertext contains the query vector
-// of dimension RECORD_DIM, repeatd to fill in all the slots.
+// under iodir/<size>/encrypted/batchNNNN/. The query ciphertext contains
+// the query vector, repeatd to fill in all the slots.
 std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
                 Ciphertext<DCRTPoly> qry, const InstanceParams& prms)
 {
@@ -345,7 +357,7 @@ std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
   size_t i = 0;  // i is the ciphertext index within a batch
   for (auto ct_i = replicator.init(qry); ct_i != nullptr;
        ct_i = replicator.next_replica(), i++) {
-    // ct_i has the i'th entry of the query vector in all its slots
+       // ct_i has the i'th entry of the query vector in all its slots
 
     // read a row from each batch, multiply by ct_i and accumulate
     std::stringstream ssi;
@@ -373,15 +385,16 @@ std::vector<Ciphertext<DCRTPoly>> mat_vec_mult(fs::path encdir,
 }
 
 /*******************************************************************/
-// Compare each slot in the ctxts to the threshold, using a Chebyshev
-// approximation of the indicator function chi(x) = (x >= threshold).
+// Compare each slot in the results ctxts to the threshold, using a
+// Chebyshev approximation of the indicator function chi(x)=(x>=threshold).
 // If we only want to count the matches, then we use use a higher-degree
-// approximation since we care about good approximation for both matches
-// and non-matches (and becuase we can afford it level-wise).
-// Otherwise we use lower-degree approximation since we mostly care about
-// accuracy of the non-matches. Also, we scale it to 0/0.5 rather than 0/1,
-// since we sum up upto eight matches, then multiply by the original thing,
-// and need to fit the result to the interval [-1,1].
+// approximation since (a) we care about good approximation for both matches
+// and non-matches and (b) we can afford it level-wise.
+// Otherwise we use lower-degree approximation since we care a little less
+// about the accuracy of matches, more about non-matches (as we have more of
+// them). Also, we scale it to 0/0.5 rather than 0/1, since we sum up upto
+// eight matches, then multiply by the original thing, and need to fit the
+// result to a size-2 interval that can be shifted to the interval [-1,1].
 
 // A sigmoid-like function. The constant 69 was determined by experiments
 constexpr double sigmoid_inscale = 69.0;
@@ -401,12 +414,14 @@ void compare_to_threshold(std::vector<Ciphertext<DCRTPoly>>& ctxts,
   for (auto& ct : ctxts) {
     ct = cc->EvalChebyshevFunction(func, ct, -1.0, 1.0, degree);
   }
-  // We care a lot more about accuracy around zero than around one. If
-  // these results are not accurate enough then we can either switch to
-  // higher-degree approximation or just suqare the result a few more times.
-  // (If we square then we need to change outscale so that after squaring
-  // we get sqrt(0.25).)
+  // NOTE: If these results are not accurate enough then we can either switch
+  // to higher-degree approximation or just suqare the result to get a better
+  // approximation of the non-matches.
 }
+
+/*******************************************************************/
+// Compare each point in the vectors to the number, using a Chebyshev
+// approximation of the function chi(x) = (x == number).
 
 // An impulse-like function
 constexpr double impulse_sigma = 0.04;
@@ -421,9 +436,6 @@ double impulse(double x, double sigma = impulse_sigma, double scaling = 0.0) {
   return std::exp(-x2 / sigma2) * scaling;
 }
 
-/*******************************************************************/
-// Compare each point in the vectors to the number, using a Chebyshev
-// approximation of the function chi(x) = (x == number).
 std::vector<Ciphertext<DCRTPoly>> compare_to_number(
     const std::vector<Ciphertext<DCRTPoly>>& ctxts, double number) {
   // The outscale is set so to get func(threshold) = 1
@@ -439,19 +451,14 @@ std::vector<Ciphertext<DCRTPoly>> compare_to_number(
   for (auto& ct : ctxts) {
     results.push_back(cc->EvalChebyshevFunction(func, ct, -1.0, 1.0, degree));
   }
-  // We care a lot more about accuracy around zero than around one. If
-  // these results are not accurate enough then we can either switch to
-  // higher-degree approximation or just suqare the result a few more times
   return results;
 }
 
 /*******************************************************************/
-// A SIMD-optimized procedure for computing total sums. The slots in the
-// input ciphertexts are viewed as multiple chunks, each chunk has the same
-// number of slots per ciphertexts, interleaved similarly to running sums,
-// and the total sums are computed per chunk. The results are returned in
-// one ciphertext, where all the slots of a given chunk in that output
-// cipehrtext contain the total sum of slots from that input chunk.
+// A SIMD-optimized procedure for computing total sums. The slots are viewed
+// as a matrix, and total sums are computed in each column separately.
+// All the entries of an output column contain the total sum of entries from
+// that column in the input.
 Ciphertext<DCRTPoly> total_sums(
   const Ciphertext<DCRTPoly>& ct, const InstanceParams& prms) {
   int period = prms.getNCols() * PAYLOAD_DIM;
