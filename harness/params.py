@@ -67,3 +67,7 @@ class InstanceParams:
     def iodir(self):
         """Return the I/O directory path."""
         return self.rootdir / "io" / instance_name(self.size)
+
+    def measuredir(self):
+        """Return the measurements directory path."""
+        return self.rootdir / "measurements" / instance_name(self.size)

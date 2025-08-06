@@ -10,40 +10,9 @@ run_submission.py - run the entire submission process, from build to verify
 import sys
 import argparse
 import subprocess
-from datetime import datetime
-from pathlib import Path
 import numpy as np
+import utils
 from params import InstanceParams, TOY, LARGE, instance_name
-
-def build_submission(script_dir: Path):
-    """
-    Build the submission, including pulling dependencies as neeed
-    """
-    # Clone and build OpenFHE if needed
-    subprocess.run([script_dir/"get_openfhe.sh"], check=True)
-    # CMake build of the submission itself
-    subprocess.run([script_dir/"build_task.sh", "./submission"], check=True)
-
-# Global variable to track the last timestamp
-_last_timestamp: datetime = None
-
-def log_step(step_num: int, step_name: str):
-    """ Helper function to print timestamp after each step with second precision """
-    global _last_timestamp
-    now = datetime.now()
-    # Format with seconds precision
-    timestamp = now.strftime("%H:%M:%S")
-
-    # Calculate elapsed time if this isn't the first call
-    elapsed_str = ""
-    if _last_timestamp is not None:
-        elapsed_seconds = (now - _last_timestamp).total_seconds()
-        elapsed_str = f" (elapsed: {int(elapsed_seconds)}s)"
-
-    # Update the last timestamp for the next call
-    _last_timestamp = now
-
-    print(f"{timestamp} [harness] {step_num}: {step_name} completed{elapsed_str}")
 
 def main():
     """
@@ -66,17 +35,13 @@ def main():
     # Use params.py to get instance parameters
     params = InstanceParams(size)
 
-    # Check that the current directory has sub-directories
-    # 'harness', 'scripts', and 'submission'
-    required_dirs = ['harness', 'scripts', 'submission']
-    for dir_name in required_dirs:
-        if not (params.rootdir / dir_name).exists():
-            print(f"Error: Required directory '{dir_name}'",
-                  f"not found in {params.rootdir}")
-            sys.exit(1)
 
-    # Build the submission if not built already
-    build_submission(params.rootdir/"scripts")
+    # Ensure the required directories exist
+    utils.ensure_directories(params.rootdir)
+
+    # Verify dependencies and build the submission, if not built already
+    subprocess.run(["bash", params.rootdir/"scripts"/"build_task.sh", "./submission"],
+                   check=True)
 
     # The harness scripts are in the 'harness' directory,
     # the executables are in the directory submission/build
@@ -99,21 +64,22 @@ def main():
 
     if args.seed is not None:
         np.random.seed(args.seed)
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(args.seed)
+    utils.log_step(0, "Init", True)
 
-    # Generate dataset with seed if provided
+    # 1. Client-side: Generate the datasets
     cmd = ["python3", harness_dir/"generate_dataset.py", str(size)]
-    if args.seed is not None:
+    if args.seed is not None:  # Use seed if provided
         gendata_seed = rng.integers(0,0x7fffffff)
         cmd.extend(["--seed", str(gendata_seed)])
     subprocess.run(cmd, check=True)
-    log_step(0, "Dataset generation")
+    utils.log_step(1, "Dataset generation")
 
-    # 1. Preprocess the dataset using exec_dir/client_preprocess_dataset
+    # 2. Client-side: Preprocess the dataset using exec_dir/client_preprocess_dataset
     subprocess.run([exec_dir/"client_preprocess_dataset", str(size)], check=True)
-    log_step(1, "Dataset preprocessing")
+    utils.log_step(2, "Dataset preprocessing")
 
-    # 2. Generate the cryptographic keys and encrypt the dataset
+    # 3. Client-side: Generate the cryptographic keys 
     # Note: this does not use the rng seed above, it lets the implementation
     #   handle its own prg needs. It means that even if called with the same
     #   seed multiple times, the keys and ciphertexts will still be different.
@@ -121,62 +87,61 @@ def main():
     if args.count_only:
         cmd.extend(["--count_only"])
     subprocess.run(cmd, check=True)
+    utils.log_step(3, "Key Generation")
+
+    # 4. Client-side: Encode and encrypt the dataset
     subprocess.run([exec_dir/"client_encode_encrypt_db", str(size)], check=True)
+    utils.log_step(4, "Dataset encoding and encryption")
 
     # Report size of keys and encrypted data
-    keys_size = subprocess.run(["du", "-sh", io_dir / "keys"], check=True,
-                           capture_output=True, text=True).stdout.split()[0]
-    encrypted_size = subprocess.run(["du", "-sh", io_dir / "encrypted"],
-                check=True, capture_output=True, text=True).stdout.split()[0]
+    utils.log_size(io_dir / "keys", "Public and evaluation keys")
+    utils.log_size(io_dir / "encrypted", "Encrypted database")
 
-    log_step(2, "Key generation and dataset encryption")
-    print("         [harness] Keys directory size:", keys_size)
-    print("         [harness] Encrypted data directory size:", encrypted_size)
-
-    # 3. Preprocess the encrypted dataset using exec_dir/server_preprocess_dataset
+    # 5. Server-side: Preprocess the encrypted dataset using exec_dir/server_preprocess_dataset
     subprocess.run([exec_dir/"server_preprocess_dataset", str(size)], check=True)
-    log_step(3, "Encrypted dataset preprocessing")
+    utils.log_step(5, "Encrypted dataset preprocessing")
 
-    # Run steps 4-9 multiple times if requested
+    # Run steps 6-11 multiple times if requested
     for run in range(args.num_runs):
         if args.num_runs > 1:
             print(f"\n         [harness] Run {run+1} of {args.num_runs}")
 
-        # 4. Generate a new random query using harness/generate_query.py
+        # 6. Client-side: Generate a new random query using harness/generate_query.py
         cmd = ["python3", harness_dir/"generate_query.py", str(size)]
         if args.seed is not None:
             # Use a different seed for each run but derived from the base seed
             genqry_seed = rng.integers(0,0x7fffffff)
             cmd.extend(["--seed", str(genqry_seed)])
         subprocess.run(cmd, check=True)
-        log_step(4, "Query generation")
+        utils.log_step(6, "Query generation")
 
-        # 5. Client side, encrypt the query
+        # 7. Client-side: Encrypt the query
         subprocess.run([exec_dir/"client_encode_encrypt_query", str(size)], check=True)
-        log_step(5, "Query encryption")
+        utils.log_step(7, "Query encryption")
+        utils.log_size(io_dir / "encrypted" / "query.bin" , "Encrypted query")
 
-        # 6. Server side, run exec_dir/server_encrypted_compute
+        # 8. Server-side: run exec_dir/server_encrypted_compute
         cmd = [exec_dir/"server_encrypted_compute", str(size)]
         if args.count_only:
             cmd.extend(["--count_only"])
         subprocess.run(cmd, check=True)
-        log_step(6, "Encrypted computation")
+        utils.log_step(8, "Encrypted computation")
 
-        # 7. Client side, decrypt and postprocess
+        # 9. Client-side: decrypt and postprocess
         subprocess.run([exec_dir/"client_decrypt_decode", str(size)], check=True)
         cmd = [exec_dir/"client_postprocess", str(size)]
         if args.count_only:
             cmd.extend(["--count_only"])
         subprocess.run(cmd, check=True)
-        log_step(7, "Result decryption and postprocessing")
+        utils.log_step(9, "Result decryption and postprocessing")
 
-        # 8. Run the plaintext processing in cleartext_impl.py and verify_results
+        # 10. Run the plaintext processing in cleartext_impl.py and verify_results
         cmd = ["python3", harness_dir/"cleartext_impl.py", str(size)]
         if args.count_only:
             cmd.extend(["--count_only"])
         subprocess.run(cmd, check=True)
 
-        # 9. Verify results
+        # 11. Verify results
         expected_file = params.datadir() / "expected.bin"
         result_file = io_dir / "results.bin"
 
@@ -190,7 +155,12 @@ def main():
             cmd.extend(["--count_only"])
         subprocess.run(cmd, check=False)
 
-    print(f"\nAll steps completed for {instance_name(size)} dataset!")
+        # 13. Store measurements
+        run_path = params.measuredir() / f"results-{run+1}.json"
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        utils.save_run(run_path)
+
+    print(f"\nAll steps completed for the {instance_name(size)} dataset!")
 
 if __name__ == "__main__":
     main()
