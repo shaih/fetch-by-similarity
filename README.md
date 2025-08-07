@@ -6,12 +6,36 @@ The `main` branch contains a reference implementation of this workload, under th
 Submitters need to clone this reposiroty, create a new branch with a name in the format `<sbumitter>-<date>`, replace the content of the `submission` subdirectory by their own implementation, and push the new branch to this repository.
 They also may need to changes or replace the script `scripts/build_task.sh` to account for dependencies and build environment for their submission.
 
+## Directory structure
+
+The directory structure of this reposiroty is as follows:
+
+├─ README.md     # This file
+├─ LICENSE.md    # Harness software license (Apache v2)
+├─ harness/      # Scripts to drive the workload implementation
+|   ├─ run_submission.py
+|   ├─ cleartext_impl.py
+|   ├─ verify_result.py
+|   └─ [...]
+├─ datasets/     # The harness scripts create and populate this directory
+├─ docs/         # Optional: additional documentation
+├─ io/           # This directory is used for client<->server communication
+├─ measurements/ # Holds logs with performance numbers
+├─ scripts/      # Helper scripts for dependencies and build system
+└─ submission/   # This is where the workload implementation lives
+    ├─ README.md   # Submission documentation (mandatory)
+    ├─ LICENSE.md  # Optional software license (if different from Apache v2)
+    └─ [...]
+
+Submitters must overwrite the contents of the `scripts` and `submissions`
+subdirectories.
+
 ## Running the fetch-by-similarity workload
 
 ```console
 git clone git@github.com:fhe-benchmarking/fetch-by-similarity.git
 cd fetch-by-similarity
-python3 harness/run_submission.py -h  # Provide information about command-line options
+python3 harness/run_submission.py -h  # Information about command-line options
 ```
 
 The harness script `harness/run_submission.py` will attempt to build the submission itself, if it is not already built. If already built, it will use the same project without re-building it (unless the code has changed). An example run is provided below.
