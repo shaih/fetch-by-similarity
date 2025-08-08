@@ -9,7 +9,7 @@ They also may need to changes or replace the script `scripts/build_task.sh` to a
 ## Directory structure
 
 The directory structure of this reposiroty is as follows:
-
+```
 ├─ README.md     # This file
 ├─ LICENSE.md    # Harness software license (Apache v2)
 ├─ harness/      # Scripts to drive the workload implementation
@@ -26,7 +26,7 @@ The directory structure of this reposiroty is as follows:
     ├─ README.md   # Submission documentation (mandatory)
     ├─ LICENSE.md  # Optional software license (if different from Apache v2)
     └─ [...]
-
+```
 Submitters must overwrite the contents of the `scripts` and `submissions`
 subdirectories.
 
