@@ -86,7 +86,7 @@ def save_run(path: Path):
     global _bandwidth
 
     json.dump({
-        "total_latency_ms": round(sum(_timestamps.values()), 4),
+        "total_latency_s": round(sum(_timestamps.values()), 4),
         "per_stage": _timestampsStr,
         "bandwidth": _bandwidth,
     }, open(path,"w"), indent=2)
