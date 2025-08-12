@@ -423,25 +423,18 @@ void compare_to_threshold(std::vector<Ciphertext<DCRTPoly>>& ctxts,
 // Compare each point in the vectors to the number, using a Chebyshev
 // approximation of the function chi(x) = (x == number).
 
-// An impulse-like function
+// An impulse-like function, with impule(0)==1.
+// The constant 0.04 was determined by experiments.
 constexpr double impulse_sigma = 0.04;
-double impulse(double x, double sigma = impulse_sigma, double scaling = 0.0) {
-  if (scaling <= 0.0) {
-    scaling = 1.0 / impulse(0.0, sigma, 1.0);
-  }
-  constexpr double two_pi = 2 * 3.1415926535897932384626433832795;
-  double x2 = x * x;
-  double sigma2 = sigma * sigma * 2;
-  scaling /= (sigma * std::sqrt(two_pi));
-  return std::exp(-x2 / sigma2) * scaling;
+double impulse(double x, double sigma = impulse_sigma) {
+  double x_over_sigma = x / sigma;
+  return std::exp(-x_over_sigma*x_over_sigma / 2);
 }
 
 std::vector<Ciphertext<DCRTPoly>> compare_to_number(
     const std::vector<Ciphertext<DCRTPoly>>& ctxts, double number) {
-  // The outscale is set so to get func(threshold) = 1
-  double outscale = 1.0 / impulse(0.0, impulse_sigma, 1.0);
-  auto func = [number, outscale](double x) {
-    return impulse(x - number, impulse_sigma, outscale);
+  auto func = [number](double x) {
+    return impulse(x - number);
   };
   constexpr size_t degree = 119;  // options are 59, 119, 247
 
