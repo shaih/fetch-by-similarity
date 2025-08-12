@@ -32,9 +32,17 @@ subdirectories.
 
 ## Running the fetch-by-similarity workload
 
+The build environment depends on OpenFHE being installed on the local machine.
+See https://github.com/openfheorg/openfhe-development#installation.
+
+Ensure that we have python dependencies
 ```console
 git clone git@github.com:fhe-benchmarking/fetch-by-similarity.git
 cd fetch-by-similarity
+python -m venv bmenv
+source ./bmenv/bin/activate
+pip install -r requirements.txt
+
 python3 harness/run_submission.py -h  # Information about command-line options
 ```
 
