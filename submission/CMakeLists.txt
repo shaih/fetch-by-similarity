@@ -45,15 +45,23 @@ include_directories( ${OpenFHE_INCLUDE}/binfhe )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+### add link options to correctly pass params to invoked linker program
+### this should eliminate the need for setting LD_LIRARY_PATH
+add_link_options(-Wl,--no-as-needed)
+
+### Set link directories for third party library requirements
 link_directories( ${OpenFHE_LIBDIR} )
 link_directories( ${OPENMP_LIBRARIES} )
+
+
 if(BUILD_STATIC)
     set( CMAKE_EXE_LINKER_FLAGS "${OpenFHE_EXE_LINKER_FLAGS} -static")
     link_libraries( ${OpenFHE_STATIC_LIBRARIES} )
-    message(STATUS "Build with static libs")
+    message(STATUS "Build with static libs: ${OpenFHE_STATIC_LIBRARIES}")
 else()
     set( CMAKE_EXE_LINKER_FLAGS ${OpenFHE_EXE_LINKER_FLAGS} )
     link_libraries( ${OpenFHE_SHARED_LIBRARIES} )
+    message(STATUS "Build with shared libs: ${OpenFHE_SHARED_LIBRARIES}")
 endif()
 
 # --------------------------------------------------------------------
