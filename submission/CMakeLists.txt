@@ -47,7 +47,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 ### add link options to correctly pass params to invoked linker program
 ### this should eliminate the need for setting LD_LIRARY_PATH
-add_link_options(-Wl,--no-as-needed)
+if(NOT APPLE)
+    add_link_options(-Wl,--no-as-needed)
+endif()
 
 ### Set link directories for third party library requirements
 link_directories( ${OpenFHE_LIBDIR} )
