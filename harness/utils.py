@@ -61,8 +61,16 @@ def log_size(path: Path, object_name: str, flag: bool = False, previous: int = 0
     """Measure the size of a directory or file on disk
     """
     global _bandwidth
-    size = int(subprocess.run(["du", "-sb", path], check=True,
-                           capture_output=True, text=True).stdout.split()[0])
+    import platform
+    if platform.system() == "Darwin":  # macOS
+        # Use -s for summary and multiply by 1024 since macOS du reports in 1K blocks by default
+        result = subprocess.run(["du", "-sk", path], check=True,
+                               capture_output=True, text=True)
+        size = int(result.stdout.split()[0]) * 1024
+    else:
+        # Linux/other systems support -b flag
+        size = int(subprocess.run(["du", "-sb", path], check=True,
+                               capture_output=True, text=True).stdout.split()[0])
     if flag:
         size -= previous
 
